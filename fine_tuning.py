@@ -3,7 +3,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from models import Uni_Sign
 import utils as utils
-from datasets import S2T_Dataset
+from datasets import S2T_Dataset, S2T_Dataset_news, LIS_Dataset
 import os
 import time
 import argparse, json, datetime
@@ -24,19 +24,36 @@ def main(args):
 
     print(f"Creating dataset:")
         
-    train_data = S2T_Dataset(path=train_label_paths[args.dataset], 
+    ###################################################################
+    """
+    train_data = S2T_Dataset_news(path=train_label_paths[args.dataset], 
+                             args=args, phase='train')
+    """
+    ###################################################################
+    train_data = LIS_Dataset(path=train_label_paths[args.dataset], 
                              args=args, phase='train')
     print(train_data)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_data,shuffle=True)
+
+    #train_sampler = torch.utils.data.distributed.DistributedSampler(train_data,shuffle=True)
+    
+    train_sampler = torch.utils.data.RandomSampler(train_data)
+
     train_dataloader = DataLoader(train_data,
                                  batch_size=args.batch_size, 
                                  num_workers=args.num_workers, 
                                  collate_fn=train_data.collate_fn,
                                  sampler=train_sampler, 
+                                 shuffle=(train_sampler is None),  # Disabilitato se c'è un sampler
                                  pin_memory=args.pin_mem,
                                  drop_last=True)
     
-    dev_data = S2T_Dataset(path=dev_label_paths[args.dataset], 
+    ###################################################################
+    """
+    dev_data = S2T_Dataset_news(path=dev_label_paths[args.dataset], 
+                           args=args, phase='dev')
+    """
+    ###################################################################
+    dev_data = LIS_Dataset(path=dev_label_paths[args.dataset], 
                            args=args, phase='dev')
     print(dev_data)
     # dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data,shuffle=False)
@@ -48,7 +65,13 @@ def main(args):
                                 sampler=dev_sampler, 
                                 pin_memory=args.pin_mem)
         
-    test_data = S2T_Dataset(path=test_label_paths[args.dataset], 
+    ###################################################################
+    """
+    test_data = S2T_Dataset_news(path=test_label_paths[args.dataset], 
+                            args=args, phase='test')
+    """
+    ###################################################################
+    test_data = LIS_Dataset(path=test_label_paths[args.dataset], 
                             args=args, phase='test')
     print(test_data)
     # test_sampler = torch.utils.data.distributed.DistributedSampler(test_data,shuffle=False)
@@ -64,7 +87,13 @@ def main(args):
     model = Uni_Sign(
                 args=args
                 )
+    """
     model.cuda()
+    """
+    ################################
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    ########################à
     model.train()
     for name, param in model.named_parameters():
         if param.requires_grad:
@@ -80,7 +109,13 @@ def main(args):
         print('Missing keys: \n', '\n'.join(ret.missing_keys))
         print('Unexpected keys: \n', '\n'.join(ret.unexpected_keys))
     
-    model_without_ddp = model
+    try:
+        # se DeepSpeed è attivo
+        model_without_ddp = model.module.module
+    except AttributeError:
+        # se NON usi DeepSpeed
+        model_without_ddp = model
+
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
@@ -96,9 +131,15 @@ def main(args):
                 num_training_steps=int(args.epochs * len(train_dataloader)/args.gradient_accumulation_steps),
             )
     
+    """
     model, optimizer, lr_scheduler = utils.init_deepspeed(args, model, optimizer, lr_scheduler)
     model_without_ddp = model.module.module
+    """
+    ##################################
+    model_without_ddp = model
+    ##################################
     # print(model_without_ddp)
+
     print(optimizer)
 
     output_dir = Path(args.output_dir)
@@ -190,6 +231,9 @@ def main(args):
     print('Training time {}'.format(total_time_str))
 
 def train_one_epoch(args, model, data_loader, optimizer, epoch):
+    ################
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ################
     model.train()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -198,24 +242,33 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
     print_freq = 10
     optimizer.zero_grad()
 
+    """
     target_dtype = None
     if model.bfloat16_enabled():
         target_dtype = torch.bfloat16
+    """
 
     for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        if target_dtype != None:
-            for key in src_input.keys():
-                if isinstance(src_input[key], torch.Tensor):
-                    src_input[key] = src_input[key].to(target_dtype).cuda()
+        #if target_dtype != None:
+        for key in src_input.keys():
+            if isinstance(src_input[key], torch.Tensor):
+                #src_input[key] = src_input[key].to(target_dtype).cuda()
+                src_input[key] = src_input[key].to(device)
 
         if args.task == "CSLR":
             tgt_input['gt_sentence'] = tgt_input['gt_gloss']
         stack_out = model(src_input, tgt_input)
         
         total_loss = stack_out['loss']
-        model.backward(total_loss)
-        model.step()
-
+        ############
+        if hasattr(model, 'backward'):
+            model.backward(total_loss)
+            model.step()
+        else:
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+        ###
         loss_value = total_loss.item()
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
@@ -231,24 +284,29 @@ def train_one_epoch(args, model, data_loader, optimizer, epoch):
     return  {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 def evaluate(args, data_loader, model, model_without_ddp, phase):
+    ################
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ################
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
 
+    """
     target_dtype = None
     if model.bfloat16_enabled():
         target_dtype = torch.bfloat16
-        
+    """
+
     with torch.no_grad():
         tgt_pres = []
         tgt_refs = []
  
         for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-            if target_dtype != None:
-                for key in src_input.keys():
-                    if isinstance(src_input[key], torch.Tensor):
-                        src_input[key] = src_input[key].to(target_dtype).cuda()
+            #if target_dtype != None:
+            for key in src_input.keys():
+                if isinstance(src_input[key], torch.Tensor):
+                    src_input[key] = src_input[key].to(device)  # usa automaticamente CPU o CUDA
             
             if args.task == "CSLR":
                 tgt_input['gt_sentence'] = tgt_input['gt_gloss']
@@ -269,7 +327,9 @@ def evaluate(args, data_loader, model, model_without_ddp, phase):
     tokenizer = model_without_ddp.mt5_tokenizer
     padding_value = tokenizer.eos_token_id
     
-    pad_tensor = torch.ones(150-len(tgt_pres[0])).cuda() * padding_value
+    #pad_tensor = torch.ones(150-len(tgt_pres[0])).cuda() * padding_value
+    pad_tensor = torch.ones(150 - len(tgt_pres[0])).to(device) * padding_value
+
     tgt_pres[0] = torch.cat((tgt_pres[0],pad_tensor.long()),dim = 0)
 
     tgt_pres = pad_sequence(tgt_pres,batch_first=True,padding_value=padding_value)
@@ -301,12 +361,26 @@ def evaluate(args, data_loader, model, model_without_ddp, phase):
     # metric_logger.synchronize_between_processes()
     
     if utils.is_main_process() and utils.get_world_size() == 1 and args.eval:
+        """
         with open(args.output_dir+f'/{phase}_tmp_pres.txt','w') as f:
             for i in range(len(tgt_pres)):
                 f.write(tgt_pres[i]+'\n')
         with open(args.output_dir+f'/{phase}_tmp_refs.txt','w') as f:
             for i in range(len(tgt_refs)):
                 f.write(tgt_refs[i]+'\n')
+        """
+        with open(args.output_dir+f'/{phase}_tmp_pres.txt', 'w', encoding='utf-8') as f:
+            for i in range(len(tgt_pres)):
+                f.write(tgt_pres[i] + '\n')
+        with open(args.output_dir+f'/{phase}_tmp_refs.txt', 'w', encoding='utf-8') as f:
+            for i in range(len(tgt_refs)):
+                f.write(tgt_refs[i] + '\n')
+
+    # Stampa a schermo predizione vs riferimento
+    print("\n--- Predizioni vs Riferimenti ---")
+    for pred, ref in zip(tgt_pres, tgt_refs):
+        print(f" Predizione: {pred}")
+        print(f" Riferimento: {ref}\n")
         
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 

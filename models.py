@@ -101,13 +101,19 @@ class Uni_Sign(nn.Module):
         
         self.apply(self._init_weights)
         
+        if "LIS" in self.args.dataset:
+            self.lang = 'Italian'
         if "CSL" in self.args.dataset:
             self.lang = 'Chinese'
         else:
             self.lang = 'English'
         
         if self.args.rgb_support:
-            self.rgb_support_backbone = torch.nn.Sequential(*list(torchvision.models.efficientnet_b0(pretrained=True).children())[:-2])
+            #self.rgb_support_backbone = torch.nn.Sequential(*list(torchvision.models.efficientnet_b0(pretrained=True).children())[:-2])
+            from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+            backbone = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
+            self.rgb_support_backbone = torch.nn.Sequential(*list(backbone.children())[:-2])
+
             self.rgb_proj = nn.Conv2d(1280, hidden_dim, kernel_size=1)
 
             self.fusion_pose_rgb_linear = nn.Linear(hidden_dim, hidden_dim)

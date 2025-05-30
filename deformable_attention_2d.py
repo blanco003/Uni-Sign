@@ -98,6 +98,11 @@ class CPB(nn.Module):
         bias = torch.sign(pos) * torch.log(pos.abs() + 1)  # log of distance is sign(rel_pos) * log(abs(rel_pos) + 1)
 
         for layer in self.mlp:
+            # Cerca un modulo che abbia `weight`
+            for mod in layer.modules():
+                if hasattr(mod, "weight"):
+                    bias = bias.to(mod.weight.dtype)
+                    break
             bias = layer(bias)
 
         bias = rearrange(bias, '(b g) i j o -> b (g o) i j', g = self.offset_groups)
@@ -123,6 +128,10 @@ class PositionEmbeddingRandom(nn.Module):
         """Positionally encode points that are normalized to [0,1]."""
         # assuming coords are in [0, 1]^2 square and have d_1 x ... x d_n x 2 shape
         coords = 2 * coords - 1
+
+        # AGGIUNTO
+        coords = coords.float()  # convert to float32
+
         coords = coords @ self.positional_encoding_gaussian_matrix
         coords = 2 * np.pi * coords
         # outputs d_1 x ... x d_n x C shape
@@ -269,8 +278,8 @@ class DeformableAttention2D(nn.Module):
         # vgrid_scaled = normalize_grid(vgrid)
 
         kv_feats = F.grid_sample(
-            group_2d(rgb_feat),
-            vgrid_scaled,
+            group_2d(rgb_feat).float(),
+            vgrid_scaled.float(),
         mode = 'bilinear', padding_mode = 'zeros', align_corners = False)
 
         kv_feats = rearrange(kv_feats, '(b g) d ... -> b (g d) ...', b = b)

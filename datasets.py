@@ -625,9 +625,6 @@ class S2T_Dataset_news(Base_Dataset):
         with path.open(encoding='utf-8') as f:
             self.annotation = json.load(f)
 
-        
-       
-
         if self.args.dataset == "CSL_News":
             print(f"Dataset: CSL_News")
             self.pose_dir = pose_dirs[args.dataset]
@@ -725,6 +722,217 @@ class S2T_Dataset_news(Base_Dataset):
         full_path = os.path.join(self.rgb_dir, rgb_name)
         print(f"Path RGB corrispondente : {full_path}")
 
+        
+        duration = len(pose['scores'])
+        print(f"Numero totale frame disponibili: {duration}") # scores che ha shape [T, 1, 133]
+
+        # se ci sono più frame del necessario seleziona self.max_length frame casuali
+        if duration > self.max_length:
+            tmp = sorted(random.sample(range(duration), k=self.max_length))
+            print(f"Campionamento casuale di {self.max_length} frame su {duration}")
+        else:
+            tmp = list(range(duration))
+            print(f"Vengono usati tutti i {duration} frame disponibili (nessun sottocampionamento)")
+        
+        tmp = np.array(tmp)
+            
+        # dict_keys(['keypoints', 'scores'])
+        # keypoints (1, 133, 2)
+        # scores (1, 133)
+        
+        skeletons = pose['keypoints']
+        confs = pose['scores']
+        skeletons_tmp = []
+        confs_tmp = []
+        
+        for index in tmp:
+            skeletons_tmp.append(skeletons[index])
+            confs_tmp.append(confs[index])
+
+        skeletons_tmp = []
+        confs_tmp = []
+
+        for index in tmp:
+            kp = skeletons[index]
+            sc = confs[index]
+
+            # Se non è già un array NumPy, convertilo
+            if not isinstance(kp, np.ndarray):
+                kp = np.array(kp)
+            if not isinstance(sc, np.ndarray):
+                sc = np.array(sc)
+
+            skeletons_tmp.append(kp)
+            confs_tmp.append(sc)
+
+        skeletons = np.array(skeletons_tmp)
+        confs = np.array(confs_tmp)
+
+
+
+        print(f"Frame selezionati: {len(skeletons)} - Keypoints shape (singolo frame): {skeletons[0].shape}")
+                
+        # normalizza e organizza i keypoint
+        kps_with_scores = load_part_kp(skeletons, confs)
+        print(f"Keypoint processati per 'body', 'left', 'right', 'face_all': {list(kps_with_scores.keys())}")
+        
+        support_rgb_dict = {}
+        if self.rgb_support:
+            print(f"Estrazione support RGB abilitata.")
+            support_rgb_dict = load_support_rgb_dict(tmp, skeletons, confs, full_path, self.data_transform)
+            print(f"Chiavi RGB support estratte: {list(support_rgb_dict.keys())}")
+
+        print("\n------------------\n")
+        return kps_with_scores, support_rgb_dict
+
+    def __str__(self):
+        # stampa una rappresentazione utile, usabile con print
+        return f'#total {len(self)}'
+    
+
+
+# eredita Base_Dataset
+class LIS_Dataset(Base_Dataset):
+
+    def __init__(self, path, args, phase):
+
+        print("\n#####################################################\nIntializing Dataset : \n")
+
+        super(LIS_Dataset, self).__init__()
+
+        self.args = args
+        self.rgb_support = self.args.rgb_support
+        
+        self.phase = phase
+        print(f"Fase : {self.phase}")
+
+        self.max_length = args.max_length
+
+        path = pathlib.Path(path)
+        
+        print(f"Recupero le annotazioni da file json: {path}")
+        with path.open(encoding='utf-8') as f:
+            self.annotation = json.load(f)
+
+        
+        print(f"Dataset: LIS")
+        self.pose_dir = pose_dirs[args.dataset]
+        self.rgb_dir = rgb_dirs[args.dataset]
+        print(f"pose_dir: {self.pose_dir}")
+        print(f"rgb_dir: {self.rgb_dir}")
+      
+    
+        
+        sum_sample = len(self.annotation)
+        print(f"Totale annotazioni caricate: {sum_sample}")
+        
+        self.data_transform = transforms.Compose([
+                                    transforms.ToTensor(),
+                                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]), 
+                                    ])
+        print("Trasformazioni per immagini RGB definite con successo.")
+
+        # divisione in train/test deterministica
+
+        if phase == 'train':
+            self.start_idx = int(sum_sample * 0.0)
+            self.end_idx = int(sum_sample * 0.99)
+            print(f"Train : indice di partenza campioni ({self.start_idx}) - indice di fine campioni ({self.end_idx})")
+        else:
+            self.start_idx = int(sum_sample * 0.99)
+            self.end_idx = int(sum_sample)
+            print(f"Test : indice di partenza campioni ({self.start_idx}) - indice di fine campioni ({self.end_idx})")
+
+        print("\n#####################################################")
+        
+        
+    def __len__(self):
+        # Restituisce il numero totale di campioni disponibili nel dataset, dipende dalla fase (train/test)
+        return self.end_idx - self.start_idx
+    
+
+    def __getitem__(self, index):
+
+        # Chiamato ogni volta che il DataLoader richiede un nuovo elemento con dato indice
+
+        # quante volte tentare in caso di errore nel caricamento di un sample
+        num_retries = 10  
+
+        # skip some invalid video sample
+        # prova a caricare
+        for _ in range(num_retries):
+
+            # estrae un sample dalla sottolista, annotations ha la struttura : { "video" : , "pose" : , "text" : }
+            sample = self.annotation[self.start_idx:self.end_idx][index]
+
+            # estrae il testo (annotazione)
+            text = sample['text']
+
+            # estrae il nome del video
+            name_sample = sample['video']
+           
+            try:
+                # Tenta di caricare i pose keypoints e i crop RGB opzionali 
+                pose_sample, support_rgb_dict = self.load_pose(sample['pose'], sample['video'])
+                
+    
+            except:
+                import traceback
+                
+                traceback.print_exc()
+                print(f"Failed to load examples with video: {name_sample}. "
+                            f"Will randomly sample an example as a replacement.")
+                index = random.randint(0, len(self) - 1)
+                continue
+
+            break
+           
+        else:  
+            raise RuntimeError(f"Failed to fetch video after {num_retries} retries.")
+        
+
+        # Restituisce una tupla con :
+        # Nome del video
+        # Dizionario con i keypoints normalizzat
+        # Frase associata alla sequenza 
+        # Campo gloss vuoto (gloss-free) 
+        # Crop RGB delle mani + keypoint normali
+        return name_sample, pose_sample, text, _, support_rgb_dict
+    
+
+    def load_pose(self, pose_name, rgb_name):
+        print("\n------------------ Load Pose : \n")
+        pose_path = os.path.join(self.pose_dir, pose_name)
+        pose = pickle.load(open(pose_path, 'rb'))
+
+        
+        #########################################################################################################
+        # Forza i keypoint e score a essere array NumPy, indipendentemente dal formato
+        pose['keypoints'] = [np.array(k) if not isinstance(k, np.ndarray) else k for k in pose['keypoints']]
+        pose['scores'] = [np.array(s) if not isinstance(s, np.ndarray) else s for s in pose['scores']]
+        #########################################################################################################
+
+
+        print(f"Keypoints caricati da: {pose_path}")
+
+
+        full_path = os.path.join(self.rgb_dir, rgb_name)
+        print(f"Path RGB corrispondente : {full_path}")
+
+        #########################################################################################################à
+        # Legge dimensioni reali del video RGB
+        import cv2  # se non è già in cima al file
+        cap = cv2.VideoCapture(full_path)
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        # Applica normalizzazione solo se valori alti (tipico dei pixel)
+        max_val = max(np.max(kp) for kp in pose['keypoints'])
+        if max_val > 10:
+            pose['keypoints'] = [np.array(kp) / [frame_w, frame_h] for kp in pose['keypoints']]
+            print(f"[NORMALIZATION] Keypoints normalizzati con frame size {frame_w}x{frame_h}")
+        #########################################################################################################
         
         duration = len(pose['scores'])
         print(f"Numero totale frame disponibili: {duration}") # scores che ha shape [T, 1, 133]

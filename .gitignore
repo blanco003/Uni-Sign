@@ -1,0 +1,23 @@
+*.swp
+__pycache__/**
+core*
+*.ipynb
+# *.sh
+*.bin
+wandb
+demo/
+backup
+*.pth
+#*.txt
+
+log/
+
+tools/*.jpg
+tools/*.mp4
+
+
+out/
+output_video/
+CSL_out/
+env3119/
+pretrained_weight/

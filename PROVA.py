@@ -107,3 +107,9 @@ if __name__ == '__main__':
 
 # pip install decord==0.6.0
 # pip install numpy==1.22.4
+
+
+# script\LIS_test_stage1.bat
+
+
+# Unable to allocate 49.0 GiB for an array with shape (132372, 132372, 3)

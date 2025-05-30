@@ -9,7 +9,7 @@ from torch.utils.data import RandomSampler, SequentialSampler
 
 from models import Uni_Sign
 import utils as utils
-from datasets import S2T_Dataset_news
+from datasets import S2T_Dataset_news, LIS_Dataset
 
 import os
 import time
@@ -31,7 +31,13 @@ def main(args):
     utils.set_seed(args.seed)
 
     print(f"Creating dataset:")
+    ##################################################################
+    """
     train_data = S2T_Dataset_news(path=train_label_paths[args.dataset], 
+                                  args=args, phase='train')
+    """
+    ###################################################################
+    train_data = LIS_Dataset(path=train_label_paths[args.dataset], 
                                   args=args, phase='train')
     print(train_data)
     """
@@ -48,7 +54,13 @@ def main(args):
                                  pin_memory=args.pin_mem,
                                  drop_last=True)
 
+    ###################################################################
+    """
     dev_data = S2T_Dataset_news(path=dev_label_paths[args.dataset], 
+                                args=args, phase='dev')
+    """
+    ###################################################################
+    dev_data = LIS_Dataset(path=dev_label_paths[args.dataset], 
                                 args=args, phase='dev')
     print(dev_data)
     """
@@ -84,6 +96,10 @@ def main(args):
         print('***********************************')
         print('Load Checkpoint...')
         print('***********************************')
+
+        print(f"Recuper Checkpoint da: {args.finetune}")
+
+
         state_dict = torch.load(args.finetune, map_location='cpu')['model']
 
         ret = model.load_state_dict(state_dict, strict=False)
